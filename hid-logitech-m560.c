@@ -19,8 +19,6 @@
 #include "hid-logitech-dj.h"
 #include "hid-logitech-hidpp.h"
 
-#define DJ_DEVICE_ID_M560 0x402d
-
 /*
  * Logitech M560 protocol overview
  *
@@ -62,7 +60,16 @@ struct m560_private_data {
 	int btn_middle:1;
 	int btn_forward:1;
 	int btn_backward:1;
+	unsigned long last_disconnection;
 };
+
+static bool reset_on_disconnection = false;
+module_param(reset_on_disconnection, bool, 0644);
+MODULE_PARM_DESC(reset_on_disconnection,
+	"The connection is reset when a disconnection happened");
+
+/* disconnection timeout to rescedule a config command */
+#define DISCONNECTION_TIMEOUT 2
 
 /* how the button are mapped in the report */
 #define MOUSE_BTN_LEFT		0
@@ -76,6 +83,19 @@ struct m560_private_data {
 #define CONFIG_COMMAND_TIMEOUT	(3*HZ)
 #define PACKET_TIMEOUT		(10*HZ)
 
+
+/*
+ * get_mydata - helper to convert from hidpp_device to mydata
+ *
+ * @hdev: hid device
+ *
+ * @return: return mydata if available, NULL otherwise
+ */
+static inline struct m560_private_data *get_mydata(struct hid_device *hdev)
+{
+	struct hidpp_device *hidpp_dev = hid_get_drvdata(hdev);
+	return hidpp_dev ? hidpp_get_drvdata(hidpp_dev) : NULL;
+}
 
 /*
  * m560_send_config_command - send the config_command to the mouse
@@ -163,6 +183,41 @@ static inline void stop_config_command(struct m560_private_data *mydata)
 	mydata->do_config_command = false;
 }
 
+static void m560_device_connect(struct hidpp_device *hidpp_dev, bool connected)
+{
+	struct m560_private_data *mydata = hidpp_get_drvdata(hidpp_dev);
+
+	if (!reset_on_disconnection)
+		return;
+
+	if (!mydata)
+		return;
+
+	if (!connected) {
+		printk(KERN_ERR "%s@%d: DISCONNECTED", __FILE__, __LINE__);
+		mydata->last_disconnection = jiffies;
+		return;
+	}
+
+	if (time_after(jiffies,
+		mydata->last_disconnection+DISCONNECTION_TIMEOUT*HZ)) {
+			printk(KERN_ERR "%s@%d: TIMEOUT: %ld",
+				__FILE__, __LINE__,
+				(long)jiffies-(long)(
+					mydata->last_disconnection+
+					DISCONNECTION_TIMEOUT*HZ));
+			start_config_command(mydata);
+			mydata->last_disconnection = jiffies;
+	} else {
+			printk(KERN_ERR "%s@%d: NO TIMEOUT: %ld",
+				__FILE__, __LINE__,
+				(long)jiffies-(long)(
+					mydata->last_disconnection+
+					DISCONNECTION_TIMEOUT*HZ));
+	}
+
+}
+
 /*
  * m560_djdevice_probe - perform the probing of the device.
  *
@@ -174,17 +229,27 @@ static int m560_djdevice_probe(struct hid_device *hdev,
 {
 
 	int ret;
-	struct m560_private_data *mydata;
+	struct m560_private_data *mydata = NULL;
+	struct hidpp_device *hidpp_dev = NULL;
 	struct dj_device *dj_device = hdev->driver_data;
 
 	if (strcmp(hdev->name, "M560"))
 		return -ENODEV;
 
-	mydata = kzalloc(sizeof(struct m560_private_data), GFP_KERNEL);
-	if (!mydata)
-		return -ENOMEM;
+	hidpp_dev = devm_hidpp_allocate(hdev);
 
+	if (!hidpp_dev) {
+		hid_err(hdev, "cannot allocate hidpp_dev\n");
+		return -ENOMEM;
+	}
+	mydata = kzalloc(sizeof(struct m560_private_data), GFP_KERNEL);
+	if (!mydata) {
+		return -ENOMEM;
+	}
+
+	hid_set_drvdata(hdev, hidpp_dev);
 	mydata->djdev = dj_device;
+	hidpp_dev->device_connect = m560_device_connect;
 
 	/* force it so input_mapping doesn't pass anything */
 	mydata->do_config_command = true;
@@ -193,13 +258,16 @@ static int m560_djdevice_probe(struct hid_device *hdev,
 	if (!ret)
 		ret = hid_hw_start(hdev, HID_CONNECT_DEFAULT);
 
-	/* we can't set before */
-	hid_set_drvdata(hdev, mydata);
-
 	if (ret) {
 		kfree(mydata);
 		return ret;
 	}
+
+	/* we can't set before */
+	hidpp_set_drvdata(hidpp_dev, mydata);
+	/* try init */
+	hid_device_io_start(hdev);
+
 	INIT_DELAYED_WORK(&mydata->work, delayedwork_callback);
 
 	start_config_command(mydata);
@@ -234,7 +302,11 @@ static inline void clear_btn_bit(u8 *data, int bit)
 static int m560_dj_raw_event(struct hid_device *hdev,
 			struct hid_report *report, u8 *data, int size)
 {
-	struct m560_private_data *mydata = hid_get_drvdata(hdev);
+	struct m560_private_data *mydata = get_mydata(hdev);
+	struct hidpp_device *hidpp_dev = hid_get_drvdata(hdev);
+
+	if (hidpp_raw_event(hidpp_dev, data, size))
+		return 1;
 
 	/* check if the data is a mouse related report */
 	if (data[0] != REPORT_TYPE_MOUSE && data[2] != 0x0a)
@@ -329,7 +401,7 @@ static int m560_dj_raw_event(struct hid_device *hdev,
  */
 static void m560_djdevice_remove(struct hid_device *hdev)
 {
-	struct m560_private_data *mydata = hid_get_drvdata(hdev);
+	struct m560_private_data *mydata = get_mydata(hdev);
 
 	if (!mydata)
 		return;
@@ -353,7 +425,7 @@ static int m560_djdevice_input_mapping(struct hid_device *hdev,
 }
 
 static const struct hid_device_id m560_dj_device[] = {
-	{ HID_DEVICE(BUS_USB, HID_GROUP_LOGITECH_DJ_DEVICE_GENERIC,
+	{ HID_DEVICE(BUS_USB, HID_GROUP_LOGITECH_DJ_DEVICE_MOUSE,
 		USB_VENDOR_ID_LOGITECH, DJ_DEVICE_ID_M560)},
 	{}
 };
