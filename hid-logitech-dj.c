@@ -41,6 +41,8 @@ static const struct hid_device_id log_dj_groups[] = {
 		.driver_data = HID_GROUP_LOGITECH_DJ_DEVICE_WTP },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_LOGITECH, DJ_DEVICE_ID_TK820),
 		.driver_data = HID_GROUP_LOGITECH_DJ_DEVICE_WTP },
+	{ HID_USB_DEVICE(USB_VENDOR_ID_LOGITECH, DJ_DEVICE_ID_M560),
+		.driver_data = HID_GROUP_LOGITECH_DJ_DEVICE_MOUSE },
 };
 
 /* Keyboard descriptor (1) */
