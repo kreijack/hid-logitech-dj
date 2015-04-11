@@ -960,7 +960,7 @@ static void wtp_connect(struct hid_device *hdev, bool connected)
 static u8 m560_config_command[] = {0x35, 0x00, 0xaf, 0x03};
 
 struct m560_private_data {
-	u8 prev_data[30]; // FIXME: select a right size
+	u8 prev_data[10];
 	int btn_middle:1;
 	int btn_forward:1;
 	int btn_backward:1;
@@ -974,19 +974,6 @@ struct m560_private_data {
 #define MOUSE_BTN_WHEEL_RIGHT	4
 #define MOUSE_BTN_FORWARD	5
 #define MOUSE_BTN_BACKWARD	6
-
-/*
- * m560_priv_data - helper to convert from hidpp_device to m560_private_data
- *
- * @hdev: hid device
- *
- * @return: return m560_private_data if available, NULL otherwise
- */
-static inline struct m560_private_data *m560_priv_data(struct hid_device *hdev)
-{
-	struct hidpp_device *hidpp_dev = hid_get_drvdata(hdev);
-	return hidpp_dev ? hidpp_dev->private_data : NULL;
-}
 
 /*
  * m560_send_config_command - send the config_command to the mouse
@@ -1024,8 +1011,6 @@ static int m560_allocate(struct hid_device *hdev)
 		return -ENOMEM;
 
 	hidpp->private_data = d;
-	//d->hidpp_dev = hidpp;
-	//d->hid_dev = hdev;
 
 	return 0;
 };
@@ -1056,19 +1041,12 @@ static inline void clear_btn_bit(u8 *data, int bit)
 
 static int m560_raw_event(struct hid_device *hdev, u8 *data, int size)
 {
-	struct m560_private_data *mydata = m560_priv_data(hdev);
+	struct hidpp_device *hidpp = hid_get_drvdata(hdev);
+	struct m560_private_data *mydata = hidpp->private_data;
 
 	/* check if the data is a mouse related report */
 	if (data[0] != 0x02 && data[2] != 0x0a)
 		return 1;
-
-	/* check if the report is the ack of the config_command */
-	if (data[0] == 0x11 && data[2] == 0x0a &&
-	    size >= (3+sizeof(m560_config_command)) &&
-	    !memcmp(data+3, m560_config_command,
-		sizeof(m560_config_command))) {
-			return true;
-	}
 
 	if (data[0] == 0x11 && data[2] == 0x0a && data[06] == 0x00) {
 		/*
@@ -1087,7 +1065,7 @@ static int m560_raw_event(struct hid_device *hdev, u8 *data, int size)
 		/* check if the event is a button */
 		btn = data[5];
 		if (btn != 0x00 && btn != 0xb0 && btn != 0xae && btn != 0xaf)
-			return true;
+			return 1;
 
 		if (btn == 0xaf)
 			mydata->btn_middle = 1;
@@ -1156,7 +1134,7 @@ static int hidpp_input_mapping(struct hid_device *hdev, struct hid_input *hi,
 
 	if (hidpp->quirks & HIDPP_QUIRK_CLASS_WTP)
 		return wtp_input_mapping(hdev, hi, field, usage, bit, max);
-	if (hidpp->quirks & HIDPP_QUIRK_CLASS_M560 &&
+	else if (hidpp->quirks & HIDPP_QUIRK_CLASS_M560 &&
 		field->application != HID_GD_MOUSE)
 		                return -1;
 
@@ -1221,7 +1199,7 @@ static int hidpp_raw_hidpp_event(struct hidpp_device *hidpp, u8 *data,
 
 	if (hidpp->quirks & HIDPP_QUIRK_CLASS_WTP)
 		return wtp_raw_event(hidpp->hid_dev, data, size);
-	if (hidpp->quirks & HIDPP_QUIRK_CLASS_M560)
+	else if (hidpp->quirks & HIDPP_QUIRK_CLASS_M560)
 		return m560_raw_event(hidpp->hid_dev, data, size);
 
 	return 0;
@@ -1251,9 +1229,8 @@ static int hidpp_raw_event(struct hid_device *hdev, struct hid_report *report,
 
 	if (hidpp->quirks & HIDPP_QUIRK_CLASS_WTP)
 		return wtp_raw_event(hdev, data, size);
-	if (hidpp->quirks & HIDPP_QUIRK_CLASS_M560)
+	else if (hidpp->quirks & HIDPP_QUIRK_CLASS_M560)
 		return m560_raw_event(hidpp->hid_dev, data, size);
-
 	return 0;
 }
 
