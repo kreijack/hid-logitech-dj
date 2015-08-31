@@ -1,5 +1,5 @@
 
-This is a beta for a driver for the Logitech mouse M560; this mouse is
+This is a beta for a driver for the Logitech mouse M560/M545/M546; this mouse is
 designed for Windows 8, and has a non conventional behavior: the mouse
 appears as a pair of mouse and keyboard and some buttons
 don't emit the standard mouse button event, but instead a combination
@@ -13,9 +13,11 @@ based on the source of hid-logitech-hidpp.c Linux driver.
 To compile:
 $ make
 
-To install:
-$ sudo rmmod hid_logitech_hidpp
-$ sudo insmod hid-logitech-hidpp.ko
+To test it:
+$ sudo make update
+
+To install it:
+$ sudo make install
 
 
 G.Baroncelli <kreijack@inwind.it>

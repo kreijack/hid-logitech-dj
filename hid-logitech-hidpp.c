@@ -36,6 +36,7 @@ MODULE_AUTHOR("Nestor Lopez Casado <nlopezcasad@logitech.com>");
 
 #define HIDPP_QUIRK_CLASS_WTP			BIT(0)
 #define HIDPP_QUIRK_CLASS_M560			BIT(1)
+#define HIDPP_QUIRK_CLASS_M545			BIT(2)
 
 /* bits 1..20 are reserved for classes */
 #define HIDPP_QUIRK_DELAYED_INIT		BIT(21)
@@ -966,6 +967,12 @@ struct m560_private_data {
 	int btn_backward:1;
 };
 
+struct m545_private_data {
+	u8 prev_data[10];
+	int btn_forward:1;
+	int btn_backward:1;
+};
+
 /* how the button are mapped in the report */
 #define MOUSE_BTN_LEFT		0
 #define MOUSE_BTN_RIGHT		1
@@ -1006,6 +1013,21 @@ static int m560_allocate(struct hid_device *hdev)
 	struct m560_private_data *d;
 
 	d = devm_kzalloc(&hdev->dev, sizeof(struct m560_private_data),
+			GFP_KERNEL);
+	if (!d)
+		return -ENOMEM;
+
+	hidpp->private_data = d;
+
+	return 0;
+};
+
+static int m545_allocate(struct hid_device *hdev)
+{
+	struct hidpp_device *hidpp = hid_get_drvdata(hdev);
+	struct m545_private_data *d;
+
+	d = devm_kzalloc(&hdev->dev, sizeof(struct m545_private_data),
 			GFP_KERNEL);
 	if (!d)
 		return -ENOMEM;
@@ -1122,6 +1144,74 @@ static int m560_raw_event(struct hid_device *hdev, u8 *data, int size)
 	return 1;
 }
 
+static int m545_raw_event(struct hid_device *hdev, u8 *data, int size)
+{
+	struct hidpp_device *hidpp = hid_get_drvdata(hdev);
+	struct m545_private_data *mydata = hidpp->private_data;
+
+	/* check if the data is a mouse related report */
+	if (data[0] != 0x02 && data[2] != 0x15)
+		return 1;
+
+	if (data[0] == 0x11 && data[2] == 0x15 && data[06] == 0x00) {
+		/*
+		 * m545 mouse button report
+		 *
+		 * data[0] = 0x11
+		 * data[1] = deviceid
+		 * data[2] = 0x15
+		 * data[5] = button (0xa9->backward, 0xae->forward, 0x00->release all)
+		 * data[6] = 0x00
+		 */
+
+		int btn, i, maxsize;
+
+		/* check if the event is a button */
+		btn = data[5];
+
+		if (btn == 0xa9)
+			mydata->btn_backward = 1;
+		else if (btn == 0xae)
+			mydata->btn_forward = 1;
+		else if (btn == 0x00) {
+			mydata->btn_backward = 0;
+			mydata->btn_forward = 0;
+		} else {
+            return 1;
+        }
+
+		/* replace the report with the old one */
+		if (size > sizeof(mydata->prev_data))
+			maxsize = sizeof(mydata->prev_data);
+		else
+			maxsize = size;
+		for (i = 0 ; i < maxsize ; i++)
+			data[i] = mydata->prev_data[i];
+
+	} else if (data[0] == 0x02) {
+		/*
+		 * standard mouse report
+		 *
+		 * data[0] = type (0x02)
+		 * data[1..2] = buttons
+		 * data[3..5] = xy
+		 * data[6] = wheel
+		 * data[7] = horizontal wheel
+		 */
+
+		/* copy the type and buttons status */
+		memcpy(mydata->prev_data, data, 3);
+	}
+
+	/* add the extra buttons */
+	if (mydata->btn_forward)
+		set_btn_bit(data+1, MOUSE_BTN_FORWARD);
+	if (mydata->btn_backward)
+		set_btn_bit(data+1, MOUSE_BTN_BACKWARD);
+
+	return 1;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Generic HID++ devices                                                      */
 /* -------------------------------------------------------------------------- */
@@ -1135,6 +1225,9 @@ static int hidpp_input_mapping(struct hid_device *hdev, struct hid_input *hi,
 	if (hidpp->quirks & HIDPP_QUIRK_CLASS_WTP)
 		return wtp_input_mapping(hdev, hi, field, usage, bit, max);
 	else if (hidpp->quirks & HIDPP_QUIRK_CLASS_M560 &&
+		field->application != HID_GD_MOUSE)
+		                return -1;
+	else if (hidpp->quirks & HIDPP_QUIRK_CLASS_M545 &&
 		field->application != HID_GD_MOUSE)
 		                return -1;
 
@@ -1201,6 +1294,8 @@ static int hidpp_raw_hidpp_event(struct hidpp_device *hidpp, u8 *data,
 		return wtp_raw_event(hidpp->hid_dev, data, size);
 	else if (hidpp->quirks & HIDPP_QUIRK_CLASS_M560)
 		return m560_raw_event(hidpp->hid_dev, data, size);
+	else if (hidpp->quirks & HIDPP_QUIRK_CLASS_M545)
+		return m545_raw_event(hidpp->hid_dev, data, size);
 
 	return 0;
 }
@@ -1231,6 +1326,8 @@ static int hidpp_raw_event(struct hid_device *hdev, struct hid_report *report,
 		return wtp_raw_event(hdev, data, size);
 	else if (hidpp->quirks & HIDPP_QUIRK_CLASS_M560)
 		return m560_raw_event(hidpp->hid_dev, data, size);
+	else if (hidpp->quirks & HIDPP_QUIRK_CLASS_M545)
+		return m545_raw_event(hidpp->hid_dev, data, size);
 	return 0;
 }
 
@@ -1375,6 +1472,11 @@ static int hidpp_probe(struct hid_device *hdev, const struct hid_device_id *id)
 		if (ret)
 			goto wtp_allocate_fail;
 	}
+	if (hidpp->quirks & HIDPP_QUIRK_CLASS_M545) {
+		ret = m545_allocate(hdev);
+		if (ret)
+			goto wtp_allocate_fail;
+	}
 
 	INIT_WORK(&hidpp->work, delayed_work_cb);
 	mutex_init(&hidpp->send_mutex);
@@ -1477,6 +1579,12 @@ static const struct hid_device_id hidpp_devices[] = {
 	  HID_DEVICE(BUS_USB, HID_GROUP_LOGITECH_DJ_DEVICE,
 		USB_VENDOR_ID_LOGITECH, 0x402d),
 	  .driver_data = HIDPP_QUIRK_CLASS_M560 | HIDPP_QUIRK_DELAYED_INIT |
+			 HIDPP_QUIRK_MULTI_INPUT
+	},
+	{ /* Mouse logitech M545/M546 */
+	  HID_DEVICE(BUS_USB, HID_GROUP_LOGITECH_DJ_DEVICE,
+		USB_VENDOR_ID_LOGITECH, 0x4028),
+	  .driver_data = HIDPP_QUIRK_CLASS_M545 | HIDPP_QUIRK_DELAYED_INIT |
 			 HIDPP_QUIRK_MULTI_INPUT
 	},
 
